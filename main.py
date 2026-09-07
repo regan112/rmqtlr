@@ -8,20 +8,19 @@ from collections import Counter
 # =========================================================
 # 기본 설정
 # =========================================================
-st.set_page_config(page_title="급식 다이어트 분석기", layout="wide")
+st.set_page_config(page_title="당곡고 급식 다이어트 분석기", layout="wide")
 
 API_KEY = st.secrets.get("NEIS_API_KEY", "")
 
-# 학교 정보 직접 지정
-SCHOOLS = [
-    {"학교명": "당곡고등학교", "시도교육청코드": "B10", "행정표준코드": "7010073"},
-    {"학교명": "수도여자고등학교", "시도교육청코드": "B10", "행정표준코드": "7010090"},
-    {"학교명": "성남고등학교", "시도교육청코드": "B10", "행정표준코드": "7010193"},
-]
+# 당곡고등학교 정보
+SCHOOL = {"학교명": "당곡고등학교", "시도교육청코드": "B10", "행정표준코드": "7010073"}
 
 # 인기 메뉴 키워드 (맛있는 날 판단용 - 임의 기준)
 TASTY_KEYWORDS = ["치킨", "피자", "돈까스", "탕수육", "떡볶이", "함박", "제육", "갈비", "볶음밥", "스파게티"]
 UNTASTY_KEYWORDS = ["나물", "샐러드", "죽", "묵"]
+
+# 디버깅 모드 (문제 해결되면 False로 변경)
+DEBUG_MODE = True
 
 
 # =========================================================
@@ -41,6 +40,16 @@ def get_meal_info(atpt_code, school_code, start_date, end_date):
         "MLSV_TO_YMD": end_date,
     }
     res = requests.get(url, params=params)
+
+    if DEBUG_MODE:
+        st.write("### 🔧 디버깅 정보")
+        st.write("요청 URL:", res.url)
+        st.write("응답 상태 코드:", res.status_code)
+        try:
+            st.json(res.json())
+        except Exception as e:
+            st.write("JSON 파싱 실패:", e)
+            st.write("응답 원문:", res.text)
 
     try:
         data = res.json()
@@ -146,16 +155,14 @@ def get_season_by_month(month):
 @st.cache_data(ttl=86400)
 def get_common_menu_by_season(season, sample_start, sample_end):
     all_menus = []
-
-    for school in SCHOOLS:
-        meals = get_meal_info(
-            school["시도교육청코드"], school["행정표준코드"],
-            sample_start, sample_end
-        )
-        for meal in meals:
-            date_obj = datetime.strptime(meal["날짜"], "%Y%m%d")
-            if get_season_by_month(date_obj.month) == season:
-                all_menus.extend(meal["메뉴"])
+    meals = get_meal_info(
+        SCHOOL["시도교육청코드"], SCHOOL["행정표준코드"],
+        sample_start, sample_end
+    )
+    for meal in meals:
+        date_obj = datetime.strptime(meal["날짜"], "%Y%m%d")
+        if get_season_by_month(date_obj.month) == season:
+            all_menus.extend(meal["메뉴"])
 
     counter = Counter(all_menus)
     return counter.most_common(15)
@@ -164,8 +171,8 @@ def get_common_menu_by_season(season, sample_start, sample_end):
 # =========================================================
 # Streamlit UI 구성
 # =========================================================
-st.title("🍚 학교 급식 다이어트 분석기")
-st.caption("당곡고등학교 · 수도여자고등학교 · 성남고등학교")
+st.title("🍚 당곡고등학교 급식 다이어트 분석기")
+st.caption("⚠️ 현재 디버깅 모드로, API 응답이 화면에 그대로 표시됩니다.")
 
 if not API_KEY:
     st.warning("⚠️ NEIS API 키가 설정되지 않았습니다. `.streamlit/secrets.toml`에 NEIS_API_KEY를 추가해주세요.")
@@ -173,10 +180,8 @@ if not API_KEY:
 
 menu = st.sidebar.radio(
     "기능 선택",
-    ["1. 영양 비율 계산 (다이어트)", "2. 주간 칼로리 최고/최저", "3. 학교별 칼로리 비교", "4. 계절별 인기 반찬"]
+    ["1. 영양 비율 계산 (다이어트)", "2. 주간 칼로리 최고/최저", "4. 계절별 인기 반찬"]
 )
-
-school_names = [s["학교명"] for s in SCHOOLS]
 
 # ---------------------------------------------------------
 # 기능 1: 영양 비율 계산
@@ -184,13 +189,11 @@ school_names = [s["학교명"] for s in SCHOOLS]
 if menu == "1. 영양 비율 계산 (다이어트)":
     st.header("📊 영양정보 기반 음식 비율 계산")
 
-    selected_school = st.selectbox("학교 선택", school_names)
-    selected_date = st.date_input("날짜 선택", datetime.today())
+    selected_date = st.date_input("날짜 선택", datetime(2025, 5, 14))  # 안전한 과거 날짜 기본값
 
     if st.button("조회하기"):
-        school = next(s for s in SCHOOLS if s["학교명"] == selected_school)
         date_str = selected_date.strftime("%Y%m%d")
-        meals = get_meal_info(school["시도교육청코드"], school["행정표준코드"], date_str, date_str)
+        meals = get_meal_info(SCHOOL["시도교육청코드"], SCHOOL["행정표준코드"], date_str, date_str)
 
         if not meals:
             st.info("해당 날짜의 급식 정보가 없습니다. (주말/공휴일이거나 아직 등록되지 않은 급식일 수 있습니다)")
@@ -217,14 +220,12 @@ if menu == "1. 영양 비율 계산 (다이어트)":
 elif menu == "2. 주간 칼로리 최고/최저":
     st.header("📅 일주일 식단 중 칼로리 최고/최저 날짜")
 
-    selected_school = st.selectbox("학교 선택", school_names)
-    start_date = st.date_input("조회 시작일", datetime.today() - timedelta(days=7))
-    end_date = st.date_input("조회 종료일", datetime.today())
+    start_date = st.date_input("조회 시작일", datetime(2025, 5, 12))
+    end_date = st.date_input("조회 종료일", datetime(2025, 5, 16))
 
     if st.button("분석하기"):
-        school = next(s for s in SCHOOLS if s["학교명"] == selected_school)
         meals = get_meal_info(
-            school["시도교육청코드"], school["행정표준코드"],
+            SCHOOL["시도교육청코드"], SCHOOL["행정표준코드"],
             start_date.strftime("%Y%m%d"), end_date.strftime("%Y%m%d")
         )
 
@@ -263,56 +264,13 @@ elif menu == "2. 주간 칼로리 최고/최저":
             )
 
 # ---------------------------------------------------------
-# 기능 3: 학교별 칼로리 비교
-# ---------------------------------------------------------
-elif menu == "3. 학교별 칼로리 비교":
-    st.header("🏫 학교별 칼로리 비교")
-
-    selected_date = st.date_input("조회할 날짜", datetime.today())
-
-    if st.button("학교 비교하기"):
-        date_str = selected_date.strftime("%Y%m%d")
-        results = []
-
-        for school in SCHOOLS:
-            meals = get_meal_info(school["시도교육청코드"], school["행정표준코드"], date_str, date_str)
-            for meal in meals:
-                taste_score = calc_taste_score(meal["메뉴"])
-                results.append({
-                    "학교명": school["학교명"],
-                    "식사구분": meal["식사구분"],
-                    "칼로리": meal["칼로리"],
-                    "맛점수": taste_score,
-                    "메뉴": ", ".join(meal["메뉴"])
-                })
-
-        if not results:
-            st.info("해당 날짜의 급식 정보가 있는 학교가 없습니다.")
-        else:
-            df = pd.DataFrame(results)
-            df["종합점수"] = df["칼로리"] * 0.5 + df["맛점수"] * 10
-
-            best_row = df.loc[df["종합점수"].idxmax()]
-
-            st.success(
-                f"🏆 오늘의 최고 학교: **{best_row['학교명']}** "
-                f"(칼로리: {best_row['칼로리']}, 맛점수: {best_row['맛점수']})"
-            )
-            st.write(f"메뉴: {best_row['메뉴']}")
-
-            st.divider()
-            st.subheader("전체 학교 급식 순위")
-            df_sorted = df.sort_values("종합점수", ascending=False).reset_index(drop=True)
-            st.dataframe(df_sorted)
-
-# ---------------------------------------------------------
 # 기능 4: 계절별 공통 인기 반찬
 # ---------------------------------------------------------
 elif menu == "4. 계절별 인기 반찬":
-    st.header("🍂 계절별 공통 인기 반찬")
+    st.header("🍂 계절별 인기 반찬 (당곡고)")
 
     season = st.selectbox("계절 선택", ["봄", "여름", "가을", "겨울"])
-    year = st.number_input("연도 선택", min_value=2020, max_value=2030, value=datetime.today().year)
+    year = st.number_input("연도 선택", min_value=2020, max_value=2030, value=2025)
 
     season_ranges = {
         "봄": (f"{year}0301", f"{year}0531"),
