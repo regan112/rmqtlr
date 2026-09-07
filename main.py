@@ -10,70 +10,38 @@ from collections import Counter
 # =========================================================
 st.set_page_config(page_title="급식 다이어트 분석기", layout="wide")
 
-API_KEY = st.secrets.get("NEIS_API_KEY", "")  # secrets.toml 에 NEIS_API_KEY = "발급받은키" 저장
-ATPT_OFC_CODE = "B10"  # 서울특별시교육청 코드
+API_KEY = st.secrets.get("NEIS_API_KEY", "")
 
-# 인기 메뉴 키워드 (맛있는 날 판단용 - 임의 기준, 자유롭게 수정 가능)
+# 학교 정보 직접 지정
+SCHOOLS = [
+    {"학교명": "당곡고등학교", "시도교육청코드": "B10", "행정표준코드": "7010073"},
+    {"학교명": "수도여자고등학교", "시도교육청코드": "B10", "행정표준코드": "7010090"},
+    {"학교명": "성남고등학교", "시도교육청코드": "B10", "행정표준코드": "7010193"},
+]
+
+# 인기 메뉴 키워드 (맛있는 날 판단용 - 임의 기준)
 TASTY_KEYWORDS = ["치킨", "피자", "돈까스", "탕수육", "떡볶이", "함박", "제육", "갈비", "볶음밥", "스파게티"]
 UNTASTY_KEYWORDS = ["나물", "샐러드", "죽", "묵"]
 
-# =========================================================
-# 1. 동작구/관악구 학교 목록 가져오기
-# =========================================================
-@st.cache_data(ttl=86400)
-def get_schools_by_district(district_name):
-    url = "https://open.neis.go.kr/hub/schoolInfo"
-    params = {
-        "KEY": API_KEY,
-        "Type": "json",
-        "pIndex": 1,
-        "pSize": 1000,
-        "ATPT_OFC_CODE": ATPT_OFC_CODE,
-        "SCHUL_NM": ""  # 전체 조회 후 필터링
-    }
-    res = requests.get(url, params=params)
-    data = res.json()
-
-    try:
-        rows = data["schoolInfo"][1]["row"]
-    except (KeyError, IndexError):
-        return []
-
-    filtered = [
-        {
-            "학교명": r["SCHUL_NM"],
-            "학교코드": r["SD_SCHUL_CODE"],
-            "주소": r.get("ORG_RDNMA", "")
-        }
-        for r in rows if district_name in r.get("ORG_RDNMA", "")
-    ]
-    return filtered
-
-
-@st.cache_data(ttl=86400)
-def get_all_target_schools():
-    dongjak = get_schools_by_district("동작구")
-    gwanak = get_schools_by_district("관악구")
-    return dongjak + gwanak
-
 
 # =========================================================
-# 2. 급식 정보 가져오기 (특정 학교, 특정 기간)
+# 급식 정보 가져오기
 # =========================================================
 @st.cache_data(ttl=3600)
-def get_meal_info(school_code, start_date, end_date):
+def get_meal_info(atpt_code, school_code, start_date, end_date):
     url = "https://open.neis.go.kr/hub/mealServiceDietInfo"
     params = {
         "KEY": API_KEY,
         "Type": "json",
         "pIndex": 1,
         "pSize": 100,
-        "ATPT_OFC_CODE": ATPT_OFC_CODE,
+        "ATPT_OFC_CODE": atpt_code,
         "SD_SCHUL_CODE": school_code,
         "MLSV_FROM_YMD": start_date,
         "MLSV_TO_YMD": end_date,
     }
     res = requests.get(url, params=params)
+
     try:
         data = res.json()
         rows = data["mealServiceDietInfo"][1]["row"]
@@ -103,16 +71,12 @@ def get_meal_info(school_code, start_date, end_date):
 
 
 def clean_menu(raw_menu):
-    """메뉴 문자열에서 <br/> 제거하고 괄호(알레르기 표시) 제거"""
     items = raw_menu.split("<br/>")
     cleaned = [re.sub(r"\(.*?\)", "", item).strip() for item in items]
     return [c for c in cleaned if c]
 
 
 def parse_nutrition(ntr_str):
-    """
-    NTR_INFO 예시: "탄수화물(g) : 120.5<br/>단백질(g) : 30.2<br/>지방(g) : 15.0 ..."
-    """
     nutrition = {}
     items = ntr_str.split("<br/>")
     for item in items:
@@ -128,7 +92,7 @@ def parse_nutrition(ntr_str):
 
 
 # =========================================================
-# 3. 맛 점수 계산 (임의 로직 - TASTY_KEYWORDS 기반)
+# 맛 점수 계산
 # =========================================================
 def calc_taste_score(menu_list):
     score = 0
@@ -143,13 +107,9 @@ def calc_taste_score(menu_list):
 
 
 # =========================================================
-# 4. 영양소 비율 계산 (다이어트 핵심 기능)
+# 영양소 비율 계산 (다이어트 핵심 기능)
 # =========================================================
 def calc_nutrition_ratio(nutrition_dict):
-    """
-    탄수화물 4kcal/g, 단백질 4kcal/g, 지방 9kcal/g 기준으로
-    각 영양소가 차지하는 칼로리 비율 계산
-    """
     carbo = nutrition_dict.get("탄수화물(g)", 0)
     protein = nutrition_dict.get("단백질(g)", 0)
     fat = nutrition_dict.get("지방(g)", 0)
@@ -170,7 +130,7 @@ def calc_nutrition_ratio(nutrition_dict):
 
 
 # =========================================================
-# 5. 계절별 공통 반찬 분석
+# 계절 판단
 # =========================================================
 def get_season_by_month(month):
     if month in [3, 4, 5]:
@@ -185,18 +145,17 @@ def get_season_by_month(month):
 
 @st.cache_data(ttl=86400)
 def get_common_menu_by_season(season, sample_start, sample_end):
-    schools = get_all_target_schools()
     all_menus = []
 
-    progress = st.progress(0)
-    for i, school in enumerate(schools):
-        meals = get_meal_info(school["학교코드"], sample_start, sample_end)
+    for school in SCHOOLS:
+        meals = get_meal_info(
+            school["시도교육청코드"], school["행정표준코드"],
+            sample_start, sample_end
+        )
         for meal in meals:
             date_obj = datetime.strptime(meal["날짜"], "%Y%m%d")
             if get_season_by_month(date_obj.month) == season:
                 all_menus.extend(meal["메뉴"])
-        progress.progress((i + 1) / max(len(schools), 1))
-    progress.empty()
 
     counter = Counter(all_menus)
     return counter.most_common(15)
@@ -205,7 +164,8 @@ def get_common_menu_by_season(season, sample_start, sample_end):
 # =========================================================
 # Streamlit UI 구성
 # =========================================================
-st.title("🍚 학교 급식 다이어트 분석기 (동작구·관악구)")
+st.title("🍚 학교 급식 다이어트 분석기")
+st.caption("당곡고등학교 · 수도여자고등학교 · 성남고등학교")
 
 if not API_KEY:
     st.warning("⚠️ NEIS API 키가 설정되지 않았습니다. `.streamlit/secrets.toml`에 NEIS_API_KEY를 추가해주세요.")
@@ -213,14 +173,13 @@ if not API_KEY:
 
 menu = st.sidebar.radio(
     "기능 선택",
-    ["1. 영양 비율 계산 (다이어트)", "2. 주간 칼로리 최고/최저", "3. 주변 학교 칼로리 비교", "4. 계절별 인기 반찬"]
+    ["1. 영양 비율 계산 (다이어트)", "2. 주간 칼로리 최고/최저", "3. 학교별 칼로리 비교", "4. 계절별 인기 반찬"]
 )
 
-schools = get_all_target_schools()
-school_names = [s["학교명"] for s in schools]
+school_names = [s["학교명"] for s in SCHOOLS]
 
 # ---------------------------------------------------------
-# 기능 1: 영양 비율 계산 (다이어트 핵심 기능)
+# 기능 1: 영양 비율 계산
 # ---------------------------------------------------------
 if menu == "1. 영양 비율 계산 (다이어트)":
     st.header("📊 영양정보 기반 음식 비율 계산")
@@ -229,12 +188,12 @@ if menu == "1. 영양 비율 계산 (다이어트)":
     selected_date = st.date_input("날짜 선택", datetime.today())
 
     if st.button("조회하기"):
-        school_code = next(s["학교코드"] for s in schools if s["학교명"] == selected_school)
+        school = next(s for s in SCHOOLS if s["학교명"] == selected_school)
         date_str = selected_date.strftime("%Y%m%d")
-        meals = get_meal_info(school_code, date_str, date_str)
+        meals = get_meal_info(school["시도교육청코드"], school["행정표준코드"], date_str, date_str)
 
         if not meals:
-            st.info("해당 날짜의 급식 정보가 없습니다.")
+            st.info("해당 날짜의 급식 정보가 없습니다. (주말/공휴일이거나 아직 등록되지 않은 급식일 수 있습니다)")
         else:
             for meal in meals:
                 st.subheader(f"{meal['식사구분']} (칼로리: {meal['칼로리']} Kcal)")
@@ -253,7 +212,7 @@ if menu == "1. 영양 비율 계산 (다이어트)":
                 )
 
 # ---------------------------------------------------------
-# 기능 2: 주간 칼로리 최고/최저 + 맛 점수
+# 기능 2: 주간 칼로리 최고/최저
 # ---------------------------------------------------------
 elif menu == "2. 주간 칼로리 최고/최저":
     st.header("📅 일주일 식단 중 칼로리 최고/최저 날짜")
@@ -263,11 +222,10 @@ elif menu == "2. 주간 칼로리 최고/최저":
     end_date = st.date_input("조회 종료일", datetime.today())
 
     if st.button("분석하기"):
-        school_code = next(s["학교코드"] for s in schools if s["학교명"] == selected_school)
+        school = next(s for s in SCHOOLS if s["학교명"] == selected_school)
         meals = get_meal_info(
-            school_code,
-            start_date.strftime("%Y%m%d"),
-            end_date.strftime("%Y%m%d")
+            school["시도교육청코드"], school["행정표준코드"],
+            start_date.strftime("%Y%m%d"), end_date.strftime("%Y%m%d")
         )
 
         if not meals:
@@ -305,20 +263,19 @@ elif menu == "2. 주간 칼로리 최고/최저":
             )
 
 # ---------------------------------------------------------
-# 기능 3: 주변 학교 칼로리 비교 (동작/관악구 전체)
+# 기능 3: 학교별 칼로리 비교
 # ---------------------------------------------------------
-elif menu == "3. 주변 학교 칼로리 비교":
-    st.header("🏫 동작구·관악구 학교별 칼로리 비교")
+elif menu == "3. 학교별 칼로리 비교":
+    st.header("🏫 학교별 칼로리 비교")
 
     selected_date = st.date_input("조회할 날짜", datetime.today())
 
-    if st.button("전체 학교 비교하기"):
+    if st.button("학교 비교하기"):
         date_str = selected_date.strftime("%Y%m%d")
         results = []
 
-        progress = st.progress(0)
-        for i, school in enumerate(schools):
-            meals = get_meal_info(school["학교코드"], date_str, date_str)
+        for school in SCHOOLS:
+            meals = get_meal_info(school["시도교육청코드"], school["행정표준코드"], date_str, date_str)
             for meal in meals:
                 taste_score = calc_taste_score(meal["메뉴"])
                 results.append({
@@ -328,14 +285,12 @@ elif menu == "3. 주변 학교 칼로리 비교":
                     "맛점수": taste_score,
                     "메뉴": ", ".join(meal["메뉴"])
                 })
-            progress.progress((i + 1) / len(schools))
-        progress.empty()
 
         if not results:
-            st.info("해당 날짜의 급식 정보가 없는 학교뿐입니다.")
+            st.info("해당 날짜의 급식 정보가 있는 학교가 없습니다.")
         else:
             df = pd.DataFrame(results)
-            df["종합점수"] = df["칼로리"] * 0.5 + df["맛점수"] * 10  # 임의 가중치
+            df["종합점수"] = df["칼로리"] * 0.5 + df["맛점수"] * 10
 
             best_row = df.loc[df["종합점수"].idxmax()]
 
@@ -354,7 +309,7 @@ elif menu == "3. 주변 학교 칼로리 비교":
 # 기능 4: 계절별 공통 인기 반찬
 # ---------------------------------------------------------
 elif menu == "4. 계절별 인기 반찬":
-    st.header("🍂 계절별 모든 학교 공통 인기 반찬")
+    st.header("🍂 계절별 공통 인기 반찬")
 
     season = st.selectbox("계절 선택", ["봄", "여름", "가을", "겨울"])
     year = st.number_input("연도 선택", min_value=2020, max_value=2030, value=datetime.today().year)
@@ -365,8 +320,6 @@ elif menu == "4. 계절별 인기 반찬":
         "가을": (f"{year}0901", f"{year}1130"),
         "겨울": (f"{year}1201", f"{year+1}0228"),
     }
-
-    st.warning("⚠️ 학교 수가 많으면 API 호출 시간이 오래 걸릴 수 있습니다 (최대 몇 분).")
 
     if st.button("분석 시작"):
         start_date, end_date = season_ranges[season]
