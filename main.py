@@ -8,23 +8,22 @@ from collections import Counter
 # =========================================================
 # 기본 설정
 # =========================================================
-st.set_page_config(page_title="당곡고 급식 다이어트 분석기", layout="wide")
+st.set_page_config(page_title="급식 다이어트 분석기", layout="wide")
 
 API_KEY = st.secrets.get("NEIS_API_KEY", "")
 
-# 당곡고등학교 정보
-SCHOOL = {"학교명": "당곡고등학교", "시도교육청코드": "B10", "행정표준코드": "7010073"}
+SCHOOLS = [
+    {"학교명": "당곡고등학교", "시도교육청코드": "B10", "행정표준코드": "7010073"},
+    {"학교명": "수도여자고등학교", "시도교육청코드": "B10", "행정표준코드": "7010090"},
+    {"학교명": "성남고등학교", "시도교육청코드": "B10", "행정표준코드": "7010193"},
+]
 
-# 인기 메뉴 키워드 (맛있는 날 판단용 - 임의 기준)
 TASTY_KEYWORDS = ["치킨", "피자", "돈까스", "탕수육", "떡볶이", "함박", "제육", "갈비", "볶음밥", "스파게티"]
 UNTASTY_KEYWORDS = ["나물", "샐러드", "죽", "묵"]
 
-# 디버깅 모드 (문제 해결되면 False로 변경)
-DEBUG_MODE = True
-
 
 # =========================================================
-# 급식 정보 가져오기
+# 급식 정보 가져오기 (에러 처리 강화)
 # =========================================================
 @st.cache_data(ttl=3600)
 def get_meal_info(atpt_code, school_code, start_date, end_date):
@@ -39,23 +38,28 @@ def get_meal_info(atpt_code, school_code, start_date, end_date):
         "MLSV_FROM_YMD": start_date,
         "MLSV_TO_YMD": end_date,
     }
-    res = requests.get(url, params=params)
-
-    if DEBUG_MODE:
-        st.write("### 🔧 디버깅 정보")
-        st.write("요청 URL:", res.url)
-        st.write("응답 상태 코드:", res.status_code)
-        try:
-            st.json(res.json())
-        except Exception as e:
-            st.write("JSON 파싱 실패:", e)
-            st.write("응답 원문:", res.text)
 
     try:
+        res = requests.get(url, params=params, timeout=10)
         data = res.json()
+    except requests.exceptions.RequestException:
+        return {"error": "네트워크 오류로 API 요청에 실패했습니다."}
+    except ValueError:
+        return {"error": "API 응답을 해석할 수 없습니다. (JSON 형식 오류)"}
+
+    # NEIS는 에러 시 RESULT 키만, 정상 시 mealServiceDietInfo 키를 반환
+    if "RESULT" in data:
+        code = data["RESULT"].get("CODE", "")
+        message = data["RESULT"].get("MESSAGE", "알 수 없는 오류")
+        if code == "INFO-200":
+            return {"error": "해당 기간에 급식 정보가 없습니다. (주말/공휴일/방학 가능성)"}
+        else:
+            return {"error": f"API 오류 [{code}]: {message}"}
+
+    try:
         rows = data["mealServiceDietInfo"][1]["row"]
     except (KeyError, IndexError):
-        return []
+        return {"error": "데이터 구조를 해석할 수 없습니다."}
 
     result = []
     for r in rows:
@@ -76,7 +80,7 @@ def get_meal_info(atpt_code, school_code, start_date, end_date):
             "칼로리": calorie,
             "영양정보": nutrition
         })
-    return result
+    return {"data": result}
 
 
 def clean_menu(raw_menu):
@@ -100,9 +104,6 @@ def parse_nutrition(ntr_str):
     return nutrition
 
 
-# =========================================================
-# 맛 점수 계산
-# =========================================================
 def calc_taste_score(menu_list):
     score = 0
     for menu in menu_list:
@@ -115,9 +116,6 @@ def calc_taste_score(menu_list):
     return score
 
 
-# =========================================================
-# 영양소 비율 계산 (다이어트 핵심 기능)
-# =========================================================
 def calc_nutrition_ratio(nutrition_dict):
     carbo = nutrition_dict.get("탄수화물(g)", 0)
     protein = nutrition_dict.get("단백질(g)", 0)
@@ -138,9 +136,6 @@ def calc_nutrition_ratio(nutrition_dict):
     }
 
 
-# =========================================================
-# 계절 판단
-# =========================================================
 def get_season_by_month(month):
     if month in [3, 4, 5]:
         return "봄"
@@ -155,33 +150,41 @@ def get_season_by_month(month):
 @st.cache_data(ttl=86400)
 def get_common_menu_by_season(season, sample_start, sample_end):
     all_menus = []
-    meals = get_meal_info(
-        SCHOOL["시도교육청코드"], SCHOOL["행정표준코드"],
-        sample_start, sample_end
-    )
-    for meal in meals:
-        date_obj = datetime.strptime(meal["날짜"], "%Y%m%d")
-        if get_season_by_month(date_obj.month) == season:
-            all_menus.extend(meal["메뉴"])
+    for school in SCHOOLS:
+        response = get_meal_info(
+            school["시도교육청코드"], school["행정표준코드"],
+            sample_start, sample_end
+        )
+        if "data" not in response:
+            continue
+        for meal in response["data"]:
+            try:
+                date_obj = datetime.strptime(meal["날짜"], "%Y%m%d")
+            except (TypeError, ValueError):
+                continue
+            if get_season_by_month(date_obj.month) == season:
+                all_menus.extend(meal["메뉴"])
 
     counter = Counter(all_menus)
     return counter.most_common(15)
 
 
 # =========================================================
-# Streamlit UI 구성
+# Streamlit UI
 # =========================================================
-st.title("🍚 당곡고등학교 급식 다이어트 분석기")
-st.caption("⚠️ 현재 디버깅 모드로, API 응답이 화면에 그대로 표시됩니다.")
+st.title("🍚 학교 급식 다이어트 분석기")
+st.caption("당곡고등학교 · 수도여자고등학교 · 성남고등학교")
 
 if not API_KEY:
-    st.warning("⚠️ NEIS API 키가 설정되지 않았습니다. `.streamlit/secrets.toml`에 NEIS_API_KEY를 추가해주세요.")
+    st.error("⚠️ NEIS API 키가 설정되지 않았습니다. `.streamlit/secrets.toml`에 NEIS_API_KEY를 추가해주세요.")
     st.stop()
 
 menu = st.sidebar.radio(
     "기능 선택",
-    ["1. 영양 비율 계산 (다이어트)", "2. 주간 칼로리 최고/최저", "4. 계절별 인기 반찬"]
+    ["1. 영양 비율 계산 (다이어트)", "2. 주간 칼로리 최고/최저", "3. 학교별 칼로리 비교", "4. 계절별 인기 반찬"]
 )
+
+school_names = [s["학교명"] for s in SCHOOLS]
 
 # ---------------------------------------------------------
 # 기능 1: 영양 비율 계산
@@ -189,15 +192,20 @@ menu = st.sidebar.radio(
 if menu == "1. 영양 비율 계산 (다이어트)":
     st.header("📊 영양정보 기반 음식 비율 계산")
 
-    selected_date = st.date_input("날짜 선택", datetime(2025, 5, 14))  # 안전한 과거 날짜 기본값
+    selected_school = st.selectbox("학교 선택", school_names)
+    selected_date = st.date_input("날짜 선택", datetime(2025, 5, 14))
 
     if st.button("조회하기"):
+        school = next(s for s in SCHOOLS if s["학교명"] == selected_school)
         date_str = selected_date.strftime("%Y%m%d")
-        meals = get_meal_info(SCHOOL["시도교육청코드"], SCHOOL["행정표준코드"], date_str, date_str)
+        response = get_meal_info(school["시도교육청코드"], school["행정표준코드"], date_str, date_str)
 
-        if not meals:
-            st.info("해당 날짜의 급식 정보가 없습니다. (주말/공휴일이거나 아직 등록되지 않은 급식일 수 있습니다)")
+        if "error" in response:
+            st.warning(f"⚠️ {response['error']}")
         else:
+            meals = response["data"]
+            if not meals:
+                st.info("해당 날짜의 급식 정보가 없습니다.")
             for meal in meals:
                 st.subheader(f"{meal['식사구분']} (칼로리: {meal['칼로리']} Kcal)")
                 st.write("**메뉴:**", ", ".join(meal["메뉴"]))
@@ -220,54 +228,112 @@ if menu == "1. 영양 비율 계산 (다이어트)":
 elif menu == "2. 주간 칼로리 최고/최저":
     st.header("📅 일주일 식단 중 칼로리 최고/최저 날짜")
 
+    selected_school = st.selectbox("학교 선택", school_names)
     start_date = st.date_input("조회 시작일", datetime(2025, 5, 12))
     end_date = st.date_input("조회 종료일", datetime(2025, 5, 16))
 
     if st.button("분석하기"):
-        meals = get_meal_info(
-            SCHOOL["시도교육청코드"], SCHOOL["행정표준코드"],
+        school = next(s for s in SCHOOLS if s["학교명"] == selected_school)
+        response = get_meal_info(
+            school["시도교육청코드"], school["행정표준코드"],
             start_date.strftime("%Y%m%d"), end_date.strftime("%Y%m%d")
         )
 
-        if not meals:
-            st.info("해당 기간의 급식 정보가 없습니다.")
+        if "error" in response:
+            st.warning(f"⚠️ {response['error']}")
         else:
-            for meal in meals:
-                meal["맛점수"] = calc_taste_score(meal["메뉴"])
+            meals = response["data"]
+            if not meals:
+                st.info("해당 기간의 급식 정보가 없습니다.")
+            else:
+                for meal in meals:
+                    meal["맛점수"] = calc_taste_score(meal["메뉴"])
 
-            df = pd.DataFrame(meals)
-            df["메뉴_str"] = df["메뉴"].apply(lambda x: ", ".join(x))
+                df = pd.DataFrame(meals)
+                df["메뉴_str"] = df["메뉴"].apply(lambda x: ", ".join(x))
 
-            max_cal_row = df.loc[df["칼로리"].idxmax()]
-            min_cal_row = df.loc[df["칼로리"].idxmin()]
+                max_cal_row = df.loc[df["칼로리"].idxmax()]
+                min_cal_row = df.loc[df["칼로리"].idxmin()]
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.success(f"🔥 가장 칼로리 높은 날: {max_cal_row['날짜']}")
-                st.write(f"칼로리: {max_cal_row['칼로리']} Kcal")
-                st.write(f"메뉴: {max_cal_row['메뉴_str']}")
-                st.write(f"맛 점수: {max_cal_row['맛점수']}")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.success(f"🔥 가장 칼로리 높은 날: {max_cal_row['날짜']}")
+                    st.write(f"칼로리: {max_cal_row['칼로리']} Kcal")
+                    st.write(f"메뉴: {max_cal_row['메뉴_str']}")
+                    st.write(f"맛 점수: {max_cal_row['맛점수']}")
 
-            with col2:
-                st.info(f"🥗 가장 칼로리 낮은 날: {min_cal_row['날짜']}")
-                st.write(f"칼로리: {min_cal_row['칼로리']} Kcal")
-                st.write(f"메뉴: {min_cal_row['메뉴_str']}")
-                st.write(f"맛 점수: {min_cal_row['맛점수']}")
+                with col2:
+                    st.info(f"🥗 가장 칼로리 낮은 날: {min_cal_row['날짜']}")
+                    st.write(f"칼로리: {min_cal_row['칼로리']} Kcal")
+                    st.write(f"메뉴: {min_cal_row['메뉴_str']}")
+                    st.write(f"맛 점수: {min_cal_row['맛점수']}")
+
+                st.divider()
+                st.subheader("전체 급식 목록")
+                st.dataframe(df[["날짜", "식사구분", "메뉴_str", "칼로리", "맛점수"]])
+
+                st.caption(
+                    "⚠️ '맛 점수'는 실제 평가 데이터가 아니라 인기 메뉴 키워드(치킨, 피자 등) 포함 여부로 "
+                    "임의로 계산한 참고용 지표입니다."
+                )
+
+# ---------------------------------------------------------
+# 기능 3: 학교별 칼로리 비교
+# ---------------------------------------------------------
+elif menu == "3. 학교별 칼로리 비교":
+    st.header("🏫 학교별 칼로리 비교")
+
+    selected_date = st.date_input("조회할 날짜", datetime(2025, 5, 14))
+
+    if st.button("학교 비교하기"):
+        date_str = selected_date.strftime("%Y%m%d")
+        results = []
+        errors = []
+
+        for school in SCHOOLS:
+            response = get_meal_info(school["시도교육청코드"], school["행정표준코드"], date_str, date_str)
+            if "error" in response:
+                errors.append(f"{school['학교명']}: {response['error']}")
+                continue
+            for meal in response["data"]:
+                taste_score = calc_taste_score(meal["메뉴"])
+                results.append({
+                    "학교명": school["학교명"],
+                    "식사구분": meal["식사구분"],
+                    "칼로리": meal["칼로리"],
+                    "맛점수": taste_score,
+                    "메뉴": ", ".join(meal["메뉴"])
+                })
+
+        if errors:
+            with st.expander("⚠️ 일부 학교 조회 실패 (클릭해서 보기)"):
+                for e in errors:
+                    st.write(e)
+
+        if not results:
+            st.info("해당 날짜의 급식 정보가 있는 학교가 없습니다.")
+        else:
+            df = pd.DataFrame(results)
+            df["종합점수"] = df["칼로리"] * 0.5 + df["맛점수"] * 10
+
+            best_row = df.loc[df["종합점수"].idxmax()]
+
+            st.success(
+                f"🏆 오늘의 최고 학교: **{best_row['학교명']}** "
+                f"(칼로리: {best_row['칼로리']}, 맛점수: {best_row['맛점수']})"
+            )
+            st.write(f"메뉴: {best_row['메뉴']}")
 
             st.divider()
-            st.subheader("전체 급식 목록")
-            st.dataframe(df[["날짜", "식사구분", "메뉴_str", "칼로리", "맛점수"]])
-
-            st.caption(
-                "⚠️ '맛 점수'는 실제 평가 데이터가 아니라 인기 메뉴 키워드(치킨, 피자 등) 포함 여부로 "
-                "임의로 계산한 참고용 지표입니다."
-            )
+            st.subheader("전체 학교 급식 순위")
+            df_sorted = df.sort_values("종합점수", ascending=False).reset_index(drop=True)
+            st.dataframe(df_sorted)
 
 # ---------------------------------------------------------
 # 기능 4: 계절별 공통 인기 반찬
 # ---------------------------------------------------------
 elif menu == "4. 계절별 인기 반찬":
-    st.header("🍂 계절별 인기 반찬 (당곡고)")
+    st.header("🍂 계절별 공통 인기 반찬")
 
     season = st.selectbox("계절 선택", ["봄", "여름", "가을", "겨울"])
     year = st.number_input("연도 선택", min_value=2020, max_value=2030, value=2025)
